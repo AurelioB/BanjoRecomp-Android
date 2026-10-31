@@ -106,6 +106,16 @@ MSG
   cp -a "$PRIVATE_INPUTS_DIR"/* .
 }
 
+apply_adreno_plume_patch() {
+  local patch_file="${PWD}/android/patches/0001-plume-vulkan-null-pipeline-guard.patch"
+  if [[ -f "$patch_file" ]]; then
+    echo "Applying Adreno 650 null pipeline guard patch to plume_vulkan.cpp..."
+    git -C lib/rt64/src/contrib/plume apply --ignore-whitespace "$patch_file" 2>/dev/null || true
+  fi
+}
+
+apply_adreno_plume_patch
+
 if [[ "$MODE" == "probe" ]]; then
   echo "Probe build selected; generated game sources are not required."
   exit 0

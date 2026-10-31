@@ -97,6 +97,7 @@ public class BanjoSDLActivity extends SDLActivity {
         File gpuDriverTmp = new File(gpuDriverRoot, GPU_DRIVER_TMP_DIR);
 
         hydrateInternalSaveFromSelectedFolder(appDataDir);
+        hydrateInternalGpuDriverFromExternalFolder(gpuDriverRoot);
 
         try {
             extractProgramAssetsIfNeeded(programDir);
@@ -692,6 +693,106 @@ public class BanjoSDLActivity extends SDLActivity {
             Log.e(TAG, "External save hydration failed; keeping app copy", e);
             if (temporary.exists() && !temporary.delete()) Log.w(TAG, "Could not remove " + temporary);
             startupSaveStatus = "External save unavailable or invalid; previous app copy retained: " + e.getMessage();
+        }
+    }
+
+    private void copyFile(File src, File dst) throws IOException {
+        try (InputStream in = new FileInputStream(src); OutputStream out = new FileOutputStream(dst)) {
+            copyStream(in, out);
+        }
+    }
+
+    private void writeActiveSelection(File activeJson, String driverId, String displayName, File driverDir, String driverSoname) throws Exception {
+        JSONObject json = new JSONObject();
+        json.put("mode", "custom");
+        json.put("driver_id", driverId);
+        json.put("display_name", displayName);
+        json.put("driver_dir", driverDir.getAbsolutePath());
+        json.put("driver_soname", driverSoname);
+        writeTextFile(activeJson, json.toString(2));
+    }
+
+    private void importDriverPackageFile(File zipFile, File gpuDriverRoot, boolean activate) throws Exception {
+        String displayName = zipFile.getName();
+        String sourceFilename = sanitizeFilename(displayName);
+        String driverId = makeDriverId(sourceFilename);
+        File importDir = new File(new File(gpuDriverRoot, GPU_DRIVER_IMPORTS_DIR), driverId);
+        if (importDir.exists() && new File(importDir, "driver.json").exists()) {
+            if (activate) {
+                ValidatedDriver vd = findSupportedDriver(importDir);
+                if (vd != null) {
+                    writeActiveSelection(new File(gpuDriverRoot, "active.json"), driverId, displayName, vd.directory, vd.soname);
+                }
+            }
+            return;
+        }
+
+        ensureCleanDirectory(importDir);
+        extractZipSafely(zipFile, importDir);
+        ValidatedDriver validatedDriver = findSupportedDriver(importDir);
+        if (validatedDriver == null) {
+            deleteRecursively(importDir);
+            throw new IOException("Staged driver does not contain supported Vulkan driver soname for ABI " + GPU_DRIVER_REQUIRED_ABI);
+        }
+
+        File driverJson = new File(importDir, "driver.json");
+        writeDriverMetadata(driverJson, displayName, driverId, validatedDriver.directory, validatedDriver.soname, sourceFilename);
+        Log.i(TAG, "Successfully auto-imported GPU driver " + driverId + " soname=" + validatedDriver.soname);
+
+        if (activate) {
+            writeActiveSelection(new File(gpuDriverRoot, "active.json"), driverId, displayName, validatedDriver.directory, validatedDriver.soname);
+            Log.i(TAG, "Activated auto-imported GPU driver " + driverId + " as default active.json");
+        }
+    }
+
+    private void hydrateInternalGpuDriverFromExternalFolder(File gpuDriverRoot) {
+        try {
+            File internalActiveJson = new File(gpuDriverRoot, "active.json");
+
+            File externalFiles = getExternalFilesDir(null);
+            if (externalFiles != null) {
+                File externalGpuDir = new File(externalFiles, GPU_DRIVER_ROOT_DIR);
+                if (!externalGpuDir.exists()) {
+                    externalGpuDir.mkdirs();
+                }
+
+                File externalActiveJson = new File(externalGpuDir, "active.json");
+                if (externalActiveJson.isFile()) {
+                    copyFile(externalActiveJson, internalActiveJson);
+                    Log.i(TAG, "Synced active.json from external storage: " + externalActiveJson.getAbsolutePath());
+                }
+
+                File[] stagedZips = externalGpuDir.listFiles((dir, name) -> name.toLowerCase(java.util.Locale.US).endsWith(".zip"));
+                if (stagedZips != null) {
+                    for (File zipFile : stagedZips) {
+                        try {
+                            importDriverPackageFile(zipFile, gpuDriverRoot, !internalActiveJson.exists());
+                        } catch (Exception e) {
+                            Log.w(TAG, "Failed to auto-import staged driver: " + zipFile.getName(), e);
+                        }
+                    }
+                }
+            }
+
+            if (!internalActiveJson.exists()) {
+                File downloadDriversDir = new File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "drivers");
+                if (downloadDriversDir.isDirectory()) {
+                    File[] downloadZips = downloadDriversDir.listFiles((dir, name) ->
+                        name.toLowerCase(java.util.Locale.US).contains("turnip") && name.toLowerCase(java.util.Locale.US).endsWith(".zip"));
+                    if (downloadZips != null && downloadZips.length > 0) {
+                        for (File zipFile : downloadZips) {
+                            try {
+                                importDriverPackageFile(zipFile, gpuDriverRoot, true);
+                                break;
+                            } catch (Exception e) {
+                                Log.w(TAG, "Failed to auto-import Turnip driver from Download: " + zipFile.getName(), e);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "hydrateInternalGpuDriverFromExternalFolder error", e);
         }
     }
 

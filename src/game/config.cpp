@@ -44,7 +44,7 @@ static void add_general_options(recomp::config::Config &config) {
         "Analog Camera",
         "Enables the analog camera.",
         analog_cam_mode_options,
-        banjo::AnalogCamMode::Off
+        banjo::AnalogCamMode::On
     );
     config.add_number_option(
         banjo::configkeys::general::analog_camera_sensitivity,
@@ -55,7 +55,7 @@ static void add_general_options(recomp::config::Config &config) {
     config.add_option_hidden_dependency(
         banjo::configkeys::general::analog_camera_sensitivity,
         banjo::configkeys::general::analog_cam_mode,
-        banjo::AnalogCamMode::Off
+        banjo::AnalogCamMode::On
     );
     static EnumOptionVector camera_invert_mode_options = {
         {banjo::CameraInvertMode::InvertNone, "InvertNone", "None"},
