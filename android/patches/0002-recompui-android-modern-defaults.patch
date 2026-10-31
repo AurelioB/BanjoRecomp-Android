@@ -1,0 +1,16 @@
+diff --git a/recompui/src/config/ui_config_tab_graphics.cpp b/recompui/src/config/ui_config_tab_graphics.cpp
+index c944d28..a843f03 100644
+--- a/recompui/src/config/ui_config_tab_graphics.cpp
++++ b/recompui/src/config/ui_config_tab_graphics.cpp
+@@ -282,7 +282,11 @@ namespace recompui {
+                 "Resolution",
+                 "Sets the output resolution of the game. <recomp-color primary>Original</recomp-color> matches the game's original 240p resolution. <recomp-color primary>Original 2x</recomp-color> will render at 480p. <recomp-color primary>Auto</recomp-color> will scale based on the game window's resolution.",
+                 resolution_options,
++#if defined(__ANDROID__)
++                ultramodern::renderer::Resolution::Original2x
++#else
+                 ultramodern::renderer::Resolution::Auto
++#endif
+             );
+             {
+                 config.add_option_change_callback(

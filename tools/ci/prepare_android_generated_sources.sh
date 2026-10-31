@@ -110,11 +110,20 @@ apply_adreno_plume_patch() {
   local patch_file="${PWD}/android/patches/0001-plume-vulkan-null-pipeline-guard.patch"
   if [[ -f "$patch_file" ]]; then
     echo "Applying Adreno 650 null pipeline guard patch to plume_vulkan.cpp..."
-    git -C lib/rt64/src/contrib/plume apply --ignore-whitespace "$patch_file" 2>/dev/null || true
+    git -C "${PWD}/lib/rt64/src/contrib/plume" apply --ignore-whitespace "$patch_file" || true
+  fi
+}
+
+apply_recompui_patch() {
+  local patch_file="${PWD}/android/patches/0002-recompui-android-modern-defaults.patch"
+  if [[ -f "$patch_file" ]]; then
+    echo "Applying modern defaults patch to recompui..."
+    git -C "${PWD}/lib/RecompFrontend" apply --ignore-whitespace "$patch_file" || true
   fi
 }
 
 apply_adreno_plume_patch
+apply_recompui_patch
 
 if [[ "$MODE" == "probe" ]]; then
   echo "Probe build selected; generated game sources are not required."

@@ -1011,6 +1011,27 @@ public class BanjoSDLActivity extends SDLActivity {
     }
 
     private ValidatedDriver findSupportedDriver(File importDir) throws IOException {
+        File metaFile = new File(importDir, "meta.json");
+        if (metaFile.isFile()) {
+            try {
+                String metaContent = readTextFile(metaFile);
+                if (metaContent != null && !metaContent.isEmpty()) {
+                    org.json.JSONObject meta = new org.json.JSONObject(metaContent);
+                    String libName = meta.optString("libraryName", null);
+                    if (libName != null && !libName.isEmpty()) {
+                        File driverFile = findFileNamed(importDir, libName);
+                        if (driverFile != null && driverFile.isFile()) {
+                            File parent = driverFile.getParentFile();
+                            if (parent != null) {
+                                return new ValidatedDriver(parent, libName);
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
         for (String soname : GPU_DRIVER_SONAME_ORDER) {
             File driverFile = findAbiDriverFile(importDir, soname, GPU_DRIVER_REQUIRED_ABI);
             if (driverFile != null && driverFile.isFile()) {
@@ -1024,8 +1045,13 @@ public class BanjoSDLActivity extends SDLActivity {
         for (String soname : GPU_DRIVER_SONAME_ORDER) {
             File driverFile = findFileNamed(importDir, soname);
             if (driverFile != null && driverFile.isFile()) {
-                throw new IOException("GPU driver package contains a supported Vulkan driver soname, but not for required ABI "
-                        + GPU_DRIVER_REQUIRED_ABI);
+                File parent = driverFile.getParentFile();
+                if (parent != null) {
+                    String parentName = parent.getName().toLowerCase(java.util.Locale.US);
+                    if (!parentName.equals("x86") && !parentName.equals("x86_64") && !parentName.equals("armeabi-v7a")) {
+                        return new ValidatedDriver(parent, soname);
+                    }
+                }
             }
         }
         return null;

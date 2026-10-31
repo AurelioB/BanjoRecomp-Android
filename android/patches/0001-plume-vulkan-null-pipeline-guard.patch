@@ -1,12 +1,16 @@
---- a/src/contrib/plume/plume_vulkan.cpp
-+++ b/src/contrib/plume/plume_vulkan.cpp
-@@ -3034,22 +3034,28 @@ namespace plume {
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 7d30360..b4ee03b 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -3033,23 +3033,31 @@ namespace plume {
+     }
+
      void VulkanCommandList::setPipeline(const RenderPipeline *pipeline) {
 -        assert(pipeline != nullptr);
 +        if (pipeline == nullptr) {
 +            return;
 +        }
- 
+
          const VulkanPipeline *interfacePipeline = static_cast<const VulkanPipeline *>(pipeline);
          switch (interfacePipeline->type) {
          case VulkanPipeline::Type::Compute: {
