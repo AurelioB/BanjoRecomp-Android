@@ -277,7 +277,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.BANJO_ANDROID_PRIVATE_INPUTS_REPO }}
-          ssh-key: ${{ secrets.BANJO_ANDROID_PRIVATE_INPUTS_SSH_KEY }}
+          token: ${{ secrets.BANJO_ANDROID_PRIVATE_INPUTS_TOKEN || github.token }}
           path: extra
           persist-credentials: false
 
