@@ -55,6 +55,15 @@ public class BanjoSDLActivity extends SDLActivity {
         "application/octet-stream",
         "application/x-zip-compressed"
     };
+    private static final String[] ROM_MIME_TYPES = new String[] {
+        "application/octet-stream",
+        "application/x-n64-rom",
+        "application/vnd.nintendo.snes.rom",
+        "application/zip",
+        "application/x-zip",
+        "application/x-zip-compressed"
+    };
+    private static final long ROM_ZIP_MAX_ENTRY_BYTES = 128L * 1024L * 1024L;
     private static final String[] GPU_DRIVER_SONAME_ORDER = new String[] {
         "libvulkan_freedreno.so",
         "vulkan.freedreno.so",
@@ -406,11 +415,7 @@ public class BanjoSDLActivity extends SDLActivity {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
             intent.setType("*/*");
-            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
-                "application/octet-stream",
-                "application/x-n64-rom",
-                "application/vnd.nintendo.snes.rom"
-            });
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, ROM_MIME_TYPES);
 
             try {
                 startActivityForResult(intent, REQUEST_SELECT_ROM);
@@ -837,7 +842,121 @@ public class BanjoSDLActivity extends SDLActivity {
         }
 
         File importDir = new File(getCacheDir(), "rom-imports");
-        return copyDocumentToCache(uri, importDir, sanitizeFilename(displayName), "selected ROM");
+        File importedFile = copyDocumentToCache(uri, importDir, sanitizeFilename(displayName), "selected ROM");
+        if (importedFile == null) {
+            return null;
+        }
+
+        File extractedRom = extractRomIfCompressed(importedFile, importDir);
+        if (extractedRom != null) {
+            if (importedFile.exists() && !importedFile.equals(extractedRom)) {
+                importedFile.delete();
+            }
+            return extractedRom;
+        }
+
+        return importedFile;
+    }
+
+    private File extractRomIfCompressed(File file, File importDir) {
+        boolean isZip = file.getName().toLowerCase(java.util.Locale.US).endsWith(".zip");
+        if (!isZip) {
+            try (FileInputStream fis = new FileInputStream(file)) {
+                byte[] header = new byte[4];
+                int count = fis.read(header);
+                if (count == 4 && header[0] == 0x50 && header[1] == 0x4B && header[2] == 0x03 && header[3] == 0x04) {
+                    isZip = true;
+                }
+            } catch (IOException ignored) {
+            }
+        }
+
+        if (!isZip) {
+            return null;
+        }
+
+        Log.i(TAG, "Selected ROM is in a ZIP archive (" + file.getName() + "); searching for N64 ROM entry...");
+
+        String targetEntryName = null;
+        try (ZipInputStream zip = new ZipInputStream(new FileInputStream(file))) {
+            ZipEntry entry;
+            String fallbackCandidate = null;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (entry.isDirectory()) {
+                    zip.closeEntry();
+                    continue;
+                }
+                String name = entry.getName();
+                String lower = name.toLowerCase(java.util.Locale.US);
+                if (lower.endsWith(".z64")) {
+                    targetEntryName = name;
+                    zip.closeEntry();
+                    break;
+                } else if (lower.endsWith(".n64") || lower.endsWith(".v64")) {
+                    if (targetEntryName == null) {
+                        targetEntryName = name;
+                    }
+                } else if (entry.getSize() >= 11L * 1024L * 1024L || entry.getSize() == -1) {
+                    if (fallbackCandidate == null) {
+                        fallbackCandidate = name;
+                    }
+                }
+                zip.closeEntry();
+            }
+            if (targetEntryName == null) {
+                targetEntryName = fallbackCandidate;
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to read entries from ROM ZIP: " + file.getAbsolutePath(), e);
+            return null;
+        }
+
+        if (targetEntryName == null) {
+            Log.w(TAG, "No N64 ROM file (.z64/.n64/.v64) found in ZIP archive: " + file.getName());
+            return null;
+        }
+
+        String entryStem = new File(targetEntryName).getName();
+        String safeName = sanitizeFilename(entryStem);
+        if (!safeName.toLowerCase(java.util.Locale.US).endsWith(".z64")
+                && !safeName.toLowerCase(java.util.Locale.US).endsWith(".n64")
+                && !safeName.toLowerCase(java.util.Locale.US).endsWith(".v64")) {
+            safeName = safeName + ".z64";
+        }
+
+        File destination = uniqueDestination(importDir, safeName);
+        try (ZipInputStream zip = new ZipInputStream(new FileInputStream(file))) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (!entry.isDirectory() && entry.getName().equals(targetEntryName)) {
+                    try (OutputStream out = new FileOutputStream(destination)) {
+                        byte[] buffer = new byte[64 * 1024];
+                        int read;
+                        long extracted = 0;
+                        while ((read = zip.read(buffer)) != -1) {
+                            extracted += read;
+                            if (extracted > ROM_ZIP_MAX_ENTRY_BYTES) {
+                                throw new IOException("ROM ZIP entry exceeds maximum allowed size");
+                            }
+                            out.write(buffer, 0, read);
+                        }
+                    }
+                    zip.closeEntry();
+                    Log.i(TAG, "Successfully extracted compressed ROM entry " + entry.getName()
+                            + " -> " + destination.getAbsolutePath());
+                    return destination;
+                }
+                zip.closeEntry();
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to extract ROM entry " + targetEntryName + " from ZIP", e);
+            if (destination.exists()) {
+                destination.delete();
+            }
+            return null;
+        }
+
+        return null;
     }
 
     private void importSelectedGpuDriver(Uri uri) {
@@ -1126,6 +1245,10 @@ public class BanjoSDLActivity extends SDLActivity {
         File latest = null;
         for (File file : files) {
             if (file == null || !file.isFile()) {
+                continue;
+            }
+            String name = file.getName().toLowerCase(java.util.Locale.US);
+            if (name.endsWith(".zip")) {
                 continue;
             }
             if (latest == null || file.lastModified() > latest.lastModified()) {
