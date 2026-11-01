@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Offline test suite for Android compressed ROM ZIP import rules in BanjoSDLActivity.
+"""Offline test suite for Android compressed ROM ZIP import and version inspection rules in BanjoSDLActivity.
 
 Verifies that:
 1. Pure .z64 files are passed through without modification.
 2. Zipped .z64 files are identified, safely extracted to .z64, and the .zip is purged.
 3. Zipped .n64 files are identified, safely extracted, and prioritized.
 4. Archives without valid ROM entries are gracefully rejected.
+5. ROM version detection identifies authentic v1.0 (Rev 0) and flags Rev A (v1.1) and Rev B (v1.2).
 """
 from __future__ import annotations
 
@@ -64,7 +65,25 @@ def extract_rom_if_compressed_mock(file_path: Path, import_dir: Path) -> Path | 
     return destination
 
 
-def test_rom_extraction():
+def inspect_rom_version_mock(file_path: Path) -> tuple[bool, int, str]:
+    if not file_path.is_file() or file_path.stat().st_size < 64:
+        return (False, -1, "Invalid")
+    with open(file_path, "rb") as f:
+        f.seek(0x3B)
+        header = f.read(5)
+        if header[:4] == b"NBKE":
+            ver = header[4]
+            if ver == 0:
+                return (True, 0, "v1.0 (Rev 0)")
+            elif ver == 1:
+                return (False, 1, "Revision A (v1.1)")
+            elif ver == 2:
+                return (False, 2, "Revision B (v1.2)")
+            return (False, ver, f"Version 0x{ver:02x}")
+    return (False, -1, "Not Banjo")
+
+
+def test_rom_extraction_and_versioning():
     temp_dir = Path(tempfile.mkdtemp(prefix="test_rom_zip_"))
     try:
         import_dir = temp_dir / "rom-imports"
@@ -98,10 +117,21 @@ def test_rom_extraction():
         assert res3.name == "game.n64"
         assert res3.read_bytes()[:4] == b"\x37\x80\x40\x12"
 
-        print("All ROM ZIP extraction fixture tests passed successfully!")
+        # Test 4: ROM version detection
+        rom_v10 = temp_dir / "Banjo-Kazooie (USA).z64"
+        rom_v10.write_bytes(b"\x00" * 0x3B + b"NBKE\x00" + b"\x00" * 100)
+        valid, ver, name = inspect_rom_version_mock(rom_v10)
+        assert valid is True and ver == 0 and name == "v1.0 (Rev 0)", f"Failed v1.0 check: {name}"
+
+        rom_reva = temp_dir / "Banjo-Kazooie (USA) (Rev A).z64"
+        rom_reva.write_bytes(b"\x00" * 0x3B + b"NBKE\x01" + b"\x00" * 100)
+        valid, ver, name = inspect_rom_version_mock(rom_reva)
+        assert valid is False and ver == 1 and name == "Revision A (v1.1)", f"Failed Rev A check: {name}"
+
+        print("All ROM ZIP extraction and version inspection fixture tests passed successfully!")
     finally:
         shutil.rmtree(temp_dir)
 
 
 if __name__ == "__main__":
-    test_rom_extraction()
+    test_rom_extraction_and_versioning()
