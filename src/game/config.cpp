@@ -44,7 +44,7 @@ static void add_general_options(recomp::config::Config &config) {
         "Analog Camera",
         "Enables the analog camera.",
         analog_cam_mode_options,
-        banjo::AnalogCamMode::Off
+        banjo::AnalogCamMode::On
     );
     config.add_number_option(
         banjo::configkeys::general::analog_camera_sensitivity,
@@ -55,7 +55,7 @@ static void add_general_options(recomp::config::Config &config) {
     config.add_option_hidden_dependency(
         banjo::configkeys::general::analog_camera_sensitivity,
         banjo::configkeys::general::analog_cam_mode,
-        banjo::AnalogCamMode::Off
+        banjo::AnalogCamMode::On
     );
     static EnumOptionVector camera_invert_mode_options = {
         {banjo::CameraInvertMode::InvertNone, "InvertNone", "None"},
@@ -177,6 +177,24 @@ static void add_graphics_options(recomp::config::Config &config) {
 static void set_control_defaults() {
     using namespace recompinput;
 
+#if defined(__ANDROID__)
+    // On Android handhelds, map Z (Crouch) to both Left Trigger (LT/ZL) and Left Bumper (LB/L1)
+    set_default_mapping_for_controller(
+        GameInput::Z,
+        {
+            InputField::controller_analog(SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_TRIGGERLEFT, true),
+            InputField::controller_digital(SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_LEFTSHOULDER)
+        }
+    );
+
+    // Left shoulder is dedicated to Crouch; keep C_DOWN on right analog stick
+    set_default_mapping_for_controller(
+        GameInput::C_DOWN,
+        { 
+            InputField::controller_analog(SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTY, true)
+        }
+    );
+#else
     // Left shoulder -> C Down | Backwards eggs / zoom out
     set_default_mapping_for_controller(
         GameInput::C_DOWN,
@@ -185,6 +203,7 @@ static void set_control_defaults() {
             InputField::controller_digital(SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_LEFTSHOULDER)
         }
     );
+#endif
 
     // Right shoulder -> C Up | Forwards eggs / first person
     set_default_mapping_for_controller(

@@ -1,0 +1,40 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 7d30360..b4ee03b 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -3033,23 +3033,31 @@ namespace plume {
+     }
+
+     void VulkanCommandList::setPipeline(const RenderPipeline *pipeline) {
+-        assert(pipeline != nullptr);
++        if (pipeline == nullptr) {
++            return;
++        }
+
+         const VulkanPipeline *interfacePipeline = static_cast<const VulkanPipeline *>(pipeline);
+         switch (interfacePipeline->type) {
+         case VulkanPipeline::Type::Compute: {
+             const VulkanComputePipeline *computePipeline = static_cast<const VulkanComputePipeline *>(interfacePipeline);
+-            vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline->vk);
++            if (computePipeline != nullptr && computePipeline->vk != VK_NULL_HANDLE) {
++                vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline->vk);
++            }
+             break;
+         }
+         case VulkanPipeline::Type::Graphics: {
+             const VulkanGraphicsPipeline *graphicsPipeline = static_cast<const VulkanGraphicsPipeline *>(interfacePipeline);
+-            vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline->vk);
++            if (graphicsPipeline != nullptr && graphicsPipeline->vk != VK_NULL_HANDLE) {
++                vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline->vk);
++            }
+             break;
+         }
+         case VulkanPipeline::Type::Raytracing: {
+             const VulkanRaytracingPipeline *raytracingPipeline = static_cast<const VulkanRaytracingPipeline *>(interfacePipeline);
+-            vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, raytracingPipeline->vk);
++            if (raytracingPipeline != nullptr && raytracingPipeline->vk != VK_NULL_HANDLE) {
++                vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, raytracingPipeline->vk);
++            }
+             break;
+         }
+         default:

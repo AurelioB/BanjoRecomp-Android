@@ -1,6 +1,7 @@
 package io.github.banjorecomp;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.database.Cursor;
@@ -24,6 +25,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.concurrent.ExecutorService;
@@ -55,6 +57,15 @@ public class BanjoSDLActivity extends SDLActivity {
         "application/octet-stream",
         "application/x-zip-compressed"
     };
+    private static final String[] ROM_MIME_TYPES = new String[] {
+        "application/octet-stream",
+        "application/x-n64-rom",
+        "application/vnd.nintendo.snes.rom",
+        "application/zip",
+        "application/x-zip",
+        "application/x-zip-compressed"
+    };
+    private static final long ROM_ZIP_MAX_ENTRY_BYTES = 128L * 1024L * 1024L;
     private static final String[] GPU_DRIVER_SONAME_ORDER = new String[] {
         "libvulkan_freedreno.so",
         "vulkan.freedreno.so",
@@ -97,6 +108,8 @@ public class BanjoSDLActivity extends SDLActivity {
         File gpuDriverTmp = new File(gpuDriverRoot, GPU_DRIVER_TMP_DIR);
 
         hydrateInternalSaveFromSelectedFolder(appDataDir);
+        hydrateInternalGpuDriverFromExternalFolder(gpuDriverRoot);
+        hydrateInternalRomFromCommonLocations(appDataDir);
 
         try {
             extractProgramAssetsIfNeeded(programDir);
@@ -114,6 +127,12 @@ public class BanjoSDLActivity extends SDLActivity {
         setupGpuDriverEnvironment(gpuDriverRoot, gpuDriverTmp, getIntent());
         File bundledDevRom = new File(programDir, "dev-roms/baserom.us.v10.z64");
         File cachedRom = findLatestCachedRom();
+        if (cachedRom == null) {
+            File internalHydrated = new File(appDataDir, "bk.n64.us.1.0.z64");
+            if (internalHydrated.isFile()) {
+                cachedRom = internalHydrated;
+            }
+        }
         if (cachedRom != null && dualScreenStatsManager != null) {
             dualScreenStatsManager.loadThemeFromRom(cachedRom);
         }
@@ -405,11 +424,7 @@ public class BanjoSDLActivity extends SDLActivity {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
             intent.setType("*/*");
-            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
-                "application/octet-stream",
-                "application/x-n64-rom",
-                "application/vnd.nintendo.snes.rom"
-            });
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, ROM_MIME_TYPES);
 
             try {
                 startActivityForResult(intent, REQUEST_SELECT_ROM);
@@ -518,6 +533,7 @@ public class BanjoSDLActivity extends SDLActivity {
                 File importedRom = copySelectedRom(data.getData());
                 if (importedRom != null) {
                     importedPath = importedRom.getAbsolutePath();
+                    inspectSelectedRomVersion(importedRom);
                     if (dualScreenStatsManager != null) {
                         dualScreenStatsManager.loadThemeFromRom(importedRom);
                     }
@@ -695,6 +711,204 @@ public class BanjoSDLActivity extends SDLActivity {
         }
     }
 
+    private void copyFile(File src, File dst) throws IOException {
+        try (InputStream in = new FileInputStream(src); OutputStream out = new FileOutputStream(dst)) {
+            copyStream(in, out);
+        }
+    }
+
+    private void writeActiveSelection(File activeJson, String driverId, String displayName, File driverDir, String driverSoname) throws Exception {
+        JSONObject json = new JSONObject();
+        json.put("mode", "custom");
+        json.put("driver_id", driverId);
+        json.put("display_name", displayName);
+        json.put("driver_dir", driverDir.getAbsolutePath());
+        json.put("driver_soname", driverSoname);
+        writeTextFile(activeJson, json.toString(2));
+    }
+
+    private void importDriverPackageFile(File zipFile, File gpuDriverRoot, boolean activate) throws Exception {
+        String displayName = zipFile.getName();
+        String sourceFilename = sanitizeFilename(displayName);
+        String driverId = makeDriverId(sourceFilename);
+        File importDir = new File(new File(gpuDriverRoot, GPU_DRIVER_IMPORTS_DIR), driverId);
+        if (importDir.exists() && new File(importDir, "driver.json").exists()) {
+            if (activate) {
+                ValidatedDriver vd = findSupportedDriver(importDir);
+                if (vd != null) {
+                    writeActiveSelection(new File(gpuDriverRoot, "active.json"), driverId, displayName, vd.directory, vd.soname);
+                }
+            }
+            return;
+        }
+
+        ensureCleanDirectory(importDir);
+        extractZipSafely(zipFile, importDir);
+        ValidatedDriver validatedDriver = findSupportedDriver(importDir);
+        if (validatedDriver == null) {
+            deleteRecursively(importDir);
+            throw new IOException("Staged driver does not contain supported Vulkan driver soname for ABI " + GPU_DRIVER_REQUIRED_ABI);
+        }
+
+        File driverJson = new File(importDir, "driver.json");
+        writeDriverMetadata(driverJson, displayName, driverId, validatedDriver.directory, validatedDriver.soname, sourceFilename);
+        Log.i(TAG, "Successfully auto-imported GPU driver " + driverId + " soname=" + validatedDriver.soname);
+
+        if (activate) {
+            writeActiveSelection(new File(gpuDriverRoot, "active.json"), driverId, displayName, validatedDriver.directory, validatedDriver.soname);
+            Log.i(TAG, "Activated auto-imported GPU driver " + driverId + " as default active.json");
+        }
+    }
+
+    private void hydrateInternalGpuDriverFromExternalFolder(File gpuDriverRoot) {
+        try {
+            File internalActiveJson = new File(gpuDriverRoot, "active.json");
+
+            File externalFiles = getExternalFilesDir(null);
+            if (externalFiles != null) {
+                File externalGpuDir = new File(externalFiles, GPU_DRIVER_ROOT_DIR);
+                if (!externalGpuDir.exists()) {
+                    externalGpuDir.mkdirs();
+                }
+
+                File externalActiveJson = new File(externalGpuDir, "active.json");
+                if (externalActiveJson.isFile()) {
+                    copyFile(externalActiveJson, internalActiveJson);
+                    Log.i(TAG, "Synced active.json from external storage: " + externalActiveJson.getAbsolutePath());
+                }
+
+                File[] stagedZips = externalGpuDir.listFiles((dir, name) -> name.toLowerCase(java.util.Locale.US).endsWith(".zip"));
+                if (stagedZips != null) {
+                    for (File zipFile : stagedZips) {
+                        try {
+                            importDriverPackageFile(zipFile, gpuDriverRoot, !internalActiveJson.exists());
+                        } catch (Exception e) {
+                            Log.w(TAG, "Failed to auto-import staged driver: " + zipFile.getName(), e);
+                        }
+                    }
+                }
+            }
+
+            if (!internalActiveJson.exists()) {
+                File downloadDriversDir = new File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "drivers");
+                if (downloadDriversDir.isDirectory()) {
+                    File[] downloadZips = downloadDriversDir.listFiles((dir, name) ->
+                        name.toLowerCase(java.util.Locale.US).contains("turnip") && name.toLowerCase(java.util.Locale.US).endsWith(".zip"));
+                    if (downloadZips != null && downloadZips.length > 0) {
+                        for (File zipFile : downloadZips) {
+                            try {
+                                importDriverPackageFile(zipFile, gpuDriverRoot, true);
+                                break;
+                            } catch (Exception e) {
+                                Log.w(TAG, "Failed to auto-import Turnip driver from Download: " + zipFile.getName(), e);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "hydrateInternalGpuDriverFromExternalFolder error", e);
+        }
+    }
+
+    private void hydrateInternalRomFromCommonLocations(File appDataDir) {
+        try {
+            File internalRom = new File(appDataDir, "bk.n64.us.1.0.z64");
+            if (internalRom.exists() && internalRom.length() >= 16 * 1024 * 1024 && isRomMatchingVersion(internalRom, 0)) {
+                Log.i(TAG, "Internal valid ROM already present: " + internalRom.getAbsolutePath());
+                return;
+            }
+
+            ArrayList<File> candidates = new ArrayList<>();
+
+            // 1. App external files dir: /sdcard/Android/data/com.aure.banjorecomp/files/
+            File externalFiles = getExternalFilesDir(null);
+            if (externalFiles != null && externalFiles.isDirectory()) {
+                candidates.add(new File(externalFiles, "banjo.z64"));
+                candidates.add(new File(externalFiles, "baserom.us.z64"));
+                candidates.add(new File(externalFiles, "Banjo-Kazooie (USA).z64"));
+                File[] z64Files = externalFiles.listFiles((dir, name) -> name.toLowerCase(java.util.Locale.US).endsWith(".z64"));
+                if (z64Files != null) {
+                    for (File f : z64Files) candidates.add(f);
+                }
+            }
+
+            // 2. Canonical MicroSD ROMs: /storage/*/ROMs/n64/
+            File storageDir = new File("/storage");
+            if (storageDir.isDirectory()) {
+                File[] volumes = storageDir.listFiles();
+                if (volumes != null) {
+                    for (File vol : volumes) {
+                        if (!vol.getName().equals("emulated") && !vol.getName().equals("self")) {
+                            File n64Dir = new File(vol, "ROMs/n64");
+                            if (n64Dir.isDirectory()) {
+                                candidates.add(new File(n64Dir, "Banjo-Kazooie (USA).z64"));
+                                candidates.add(new File(n64Dir, "banjo.z64"));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. /sdcard/Download
+            File downloads = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS);
+            if (downloads != null && downloads.isDirectory()) {
+                candidates.add(new File(downloads, "Banjo-Kazooie (USA).z64"));
+                candidates.add(new File(downloads, "banjo.z64"));
+            }
+
+            for (File candidate : candidates) {
+                if (candidate.isFile() && candidate.length() >= 16 * 1024 * 1024) {
+                    if (isRomMatchingVersion(candidate, 0)) {
+                        Log.i(TAG, "Discovered authentic v1.0 ROM: " + candidate.getAbsolutePath() + "; hydrating internal ROM...");
+                        if (!appDataDir.exists()) appDataDir.mkdirs();
+                        copyFile(candidate, internalRom);
+                        Log.i(TAG, "Successfully hydrated internal ROM: " + internalRom.getAbsolutePath());
+                        return;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "hydrateInternalRomFromCommonLocations error", e);
+        }
+    }
+
+    private boolean isRomMatchingVersion(File file, int expectedVersion) {
+        if (!file.isFile() || file.length() < 64) return false;
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            raf.seek(0x3B);
+            byte[] header = new byte[5];
+            raf.readFully(header);
+            return header[0] == 'N' && header[1] == 'B' && header[2] == 'K' && header[3] == 'E' && (header[4] & 0xFF) == expectedVersion;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void inspectSelectedRomVersion(File file) {
+        if (!file.isFile() || file.length() < 64) return;
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            raf.seek(0x3B);
+            byte[] h = new byte[5];
+            raf.readFully(h);
+            if (h[0] == 'N' && h[1] == 'B' && h[2] == 'K' && h[3] == 'E') {
+                int ver = h[4] & 0xFF;
+                if (ver != 0) {
+                    String verName = ver == 1 ? "Revision A (v1.1)" : (ver == 2 ? "Revision B (v1.2)" : ("Version 0x" + Integer.toHexString(ver)));
+                    runOnUiThread(() -> {
+                        new AlertDialog.Builder(this)
+                                .setTitle("Unsupported ROM Version")
+                                .setMessage("The selected ROM is Banjo-Kazooie " + verName + ".\n\nBanjo Recompiled requires the authentic NTSC-U v1.0 (Rev 0) ROM.\n\nPlease select 'Banjo-Kazooie (USA).z64'.")
+                                .setPositiveButton("OK", null)
+                                .show();
+                    });
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to inspect selected ROM header", e);
+        }
+    }
+
     private void copyUriToFile(Uri uri, File file) throws IOException {
         try (InputStream in = getContentResolver().openInputStream(uri); OutputStream out = new FileOutputStream(file)) {
             if (in == null) throw new IOException("Provider returned no input stream");
@@ -736,7 +950,121 @@ public class BanjoSDLActivity extends SDLActivity {
         }
 
         File importDir = new File(getCacheDir(), "rom-imports");
-        return copyDocumentToCache(uri, importDir, sanitizeFilename(displayName), "selected ROM");
+        File importedFile = copyDocumentToCache(uri, importDir, sanitizeFilename(displayName), "selected ROM");
+        if (importedFile == null) {
+            return null;
+        }
+
+        File extractedRom = extractRomIfCompressed(importedFile, importDir);
+        if (extractedRom != null) {
+            if (importedFile.exists() && !importedFile.equals(extractedRom)) {
+                importedFile.delete();
+            }
+            return extractedRom;
+        }
+
+        return importedFile;
+    }
+
+    private File extractRomIfCompressed(File file, File importDir) {
+        boolean isZip = file.getName().toLowerCase(java.util.Locale.US).endsWith(".zip");
+        if (!isZip) {
+            try (FileInputStream fis = new FileInputStream(file)) {
+                byte[] header = new byte[4];
+                int count = fis.read(header);
+                if (count == 4 && header[0] == 0x50 && header[1] == 0x4B && header[2] == 0x03 && header[3] == 0x04) {
+                    isZip = true;
+                }
+            } catch (IOException ignored) {
+            }
+        }
+
+        if (!isZip) {
+            return null;
+        }
+
+        Log.i(TAG, "Selected ROM is in a ZIP archive (" + file.getName() + "); searching for N64 ROM entry...");
+
+        String targetEntryName = null;
+        try (ZipInputStream zip = new ZipInputStream(new FileInputStream(file))) {
+            ZipEntry entry;
+            String fallbackCandidate = null;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (entry.isDirectory()) {
+                    zip.closeEntry();
+                    continue;
+                }
+                String name = entry.getName();
+                String lower = name.toLowerCase(java.util.Locale.US);
+                if (lower.endsWith(".z64")) {
+                    targetEntryName = name;
+                    zip.closeEntry();
+                    break;
+                } else if (lower.endsWith(".n64") || lower.endsWith(".v64")) {
+                    if (targetEntryName == null) {
+                        targetEntryName = name;
+                    }
+                } else if (entry.getSize() >= 11L * 1024L * 1024L || entry.getSize() == -1) {
+                    if (fallbackCandidate == null) {
+                        fallbackCandidate = name;
+                    }
+                }
+                zip.closeEntry();
+            }
+            if (targetEntryName == null) {
+                targetEntryName = fallbackCandidate;
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to read entries from ROM ZIP: " + file.getAbsolutePath(), e);
+            return null;
+        }
+
+        if (targetEntryName == null) {
+            Log.w(TAG, "No N64 ROM file (.z64/.n64/.v64) found in ZIP archive: " + file.getName());
+            return null;
+        }
+
+        String entryStem = new File(targetEntryName).getName();
+        String safeName = sanitizeFilename(entryStem);
+        if (!safeName.toLowerCase(java.util.Locale.US).endsWith(".z64")
+                && !safeName.toLowerCase(java.util.Locale.US).endsWith(".n64")
+                && !safeName.toLowerCase(java.util.Locale.US).endsWith(".v64")) {
+            safeName = safeName + ".z64";
+        }
+
+        File destination = uniqueDestination(importDir, safeName);
+        try (ZipInputStream zip = new ZipInputStream(new FileInputStream(file))) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (!entry.isDirectory() && entry.getName().equals(targetEntryName)) {
+                    try (OutputStream out = new FileOutputStream(destination)) {
+                        byte[] buffer = new byte[64 * 1024];
+                        int read;
+                        long extracted = 0;
+                        while ((read = zip.read(buffer)) != -1) {
+                            extracted += read;
+                            if (extracted > ROM_ZIP_MAX_ENTRY_BYTES) {
+                                throw new IOException("ROM ZIP entry exceeds maximum allowed size");
+                            }
+                            out.write(buffer, 0, read);
+                        }
+                    }
+                    zip.closeEntry();
+                    Log.i(TAG, "Successfully extracted compressed ROM entry " + entry.getName()
+                            + " -> " + destination.getAbsolutePath());
+                    return destination;
+                }
+                zip.closeEntry();
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to extract ROM entry " + targetEntryName + " from ZIP", e);
+            if (destination.exists()) {
+                destination.delete();
+            }
+            return null;
+        }
+
+        return null;
     }
 
     private void importSelectedGpuDriver(Uri uri) {
@@ -910,6 +1238,27 @@ public class BanjoSDLActivity extends SDLActivity {
     }
 
     private ValidatedDriver findSupportedDriver(File importDir) throws IOException {
+        File metaFile = new File(importDir, "meta.json");
+        if (metaFile.isFile()) {
+            try {
+                String metaContent = readTextFile(metaFile);
+                if (metaContent != null && !metaContent.isEmpty()) {
+                    org.json.JSONObject meta = new org.json.JSONObject(metaContent);
+                    String libName = meta.optString("libraryName", null);
+                    if (libName != null && !libName.isEmpty()) {
+                        File driverFile = findFileNamed(importDir, libName);
+                        if (driverFile != null && driverFile.isFile()) {
+                            File parent = driverFile.getParentFile();
+                            if (parent != null) {
+                                return new ValidatedDriver(parent, libName);
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
         for (String soname : GPU_DRIVER_SONAME_ORDER) {
             File driverFile = findAbiDriverFile(importDir, soname, GPU_DRIVER_REQUIRED_ABI);
             if (driverFile != null && driverFile.isFile()) {
@@ -923,8 +1272,13 @@ public class BanjoSDLActivity extends SDLActivity {
         for (String soname : GPU_DRIVER_SONAME_ORDER) {
             File driverFile = findFileNamed(importDir, soname);
             if (driverFile != null && driverFile.isFile()) {
-                throw new IOException("GPU driver package contains a supported Vulkan driver soname, but not for required ABI "
-                        + GPU_DRIVER_REQUIRED_ABI);
+                File parent = driverFile.getParentFile();
+                if (parent != null) {
+                    String parentName = parent.getName().toLowerCase(java.util.Locale.US);
+                    if (!parentName.equals("x86") && !parentName.equals("x86_64") && !parentName.equals("armeabi-v7a")) {
+                        return new ValidatedDriver(parent, soname);
+                    }
+                }
             }
         }
         return null;
@@ -999,6 +1353,10 @@ public class BanjoSDLActivity extends SDLActivity {
         File latest = null;
         for (File file : files) {
             if (file == null || !file.isFile()) {
+                continue;
+            }
+            String name = file.getName().toLowerCase(java.util.Locale.US);
+            if (name.endsWith(".zip")) {
                 continue;
             }
             if (latest == null || file.lastModified() > latest.lastModified()) {
